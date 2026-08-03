@@ -13,6 +13,9 @@ A multi-source manga batch downloader: reads a name list, aggregates search resu
 - Page-gap filling: every run verifies page counts against the source and fills missing pages
 - Chapter cache: image lists are cached locally so switching sources does not require refetching
 - Cover download: saves the cover into the series folder
+- Automatic retry on failure: retries when search returns no result or chapter image list fails (default 65s, configurable via `fetch_retry_seconds`), with a live countdown in the progress area, and skips only after the timeout
+- Tankobon/volume detection: chapters whose page count exceeds the limit (default 150) or whose title contains “第x卷” (volume N) are skipped automatically, so only regular chapters are downloaded
+- Complete failure records: failed chapters during source switching are also written to `失败.log` even if a later source succeeds
 - Stall protection: a chapter stuck beyond the configured timeout triggers a source switch; per-image timeouts are configurable
 - Interactive menu: press Ctrl+F for skip comic/chapter, re-download previous chapter, pause, status, exit
 
@@ -48,6 +51,9 @@ Key options are in `config.json` (each item has an inline comment):
 | `image_rate` | Image requests per minute, 0 = unlimited |
 | `timeout` | Per-image download timeout in seconds |
 | `stall_timeout` | Seconds before a stalled chapter triggers source switch |
+| `fetch_retry_seconds` | Total retry window (seconds) on failure: no search result or chapter image list failure; skips only if it still fails after the window |
+| `max_pages_per_chapter` | Page-count limit per chapter; exceeding it is treated as a tankobon/collection and skipped (0 disables) |
+| `skip_volume_titles` | Skip chapters whose title contains “第x卷” (volume N) |
 | `cache_ttl_hours` | Chapter cache validity in hours |
 | `match_threshold` | Title fuzzy-match threshold |
 | `zmh_account` / `zmh_password` | Optional ZaiManHua login |

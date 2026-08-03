@@ -917,6 +917,8 @@ def download_comic(
     api_interval: float = 1.0,
     stall_timeout: int = 300,
     fetch_retry_seconds: float = 65.0,
+    max_pages_per_chapter: int = 150,
+    skip_volume_titles: bool = True,
     ctrl: ControlState | None = None,
 ) -> tuple[int, list[str]]:
     if ctrl is None:
@@ -940,6 +942,10 @@ def download_comic(
         label = chapter_folder_name(chapter.order)
         ev = cancel_events[chapter.order]
         if ev.is_set():
+            return "skip", label
+        if skip_volume_titles and re.search(r"第\s*[\d０-９]+\s*卷", chapter.name):
+            # 章节名含"第x卷"字样，判定为单行本/合集（卷），跳过不下载
+            emit(c_warn(f"    [skip] {label} 章节名含卷信息（{chapter.name}），跳过"))
             return "skip", label
         chapter_dir = prepare_chapter_dir(
             comic_dir, chapter.order, flat=flat, reset=not resume
@@ -1001,6 +1007,13 @@ def download_comic(
             progress.mark_done(chapter.order)
             emit(c_fail("    [fail] 章节没有可用图片"))
             return "fail", f"{label} (无图片)"
+        if max_pages_per_chapter > 0 and len(urls) > max_pages_per_chapter:
+            # 页数远超单话上限，判定为单行本/合集（卷），跳过不下载
+            progress.mark_done(chapter.order)
+            emit(c_warn(
+                f"    [skip] {label} 疑似卷/合集（{len(urls)} 页 > {max_pages_per_chapter}），跳过"
+            ))
+            return "skip", label
         existing_pages = count_valid_pages(
             chapter_dir, len(urls), order=chapter.order, flat=flat
         )
@@ -1220,6 +1233,8 @@ def process_names(
     api_interval: float = 1.0,
     stall_timeout: int = 300,
     fetch_retry_seconds: float = 65.0,
+    max_pages_per_chapter: int = 150,
+    skip_volume_titles: bool = True,
     ctrl: ControlState | None = None,
     source_priority: list[str] | None = None,
     chapter_gap_threshold: int = 15,
@@ -1314,6 +1329,8 @@ def process_names(
                     api_interval=api_interval,
                     stall_timeout=stall_timeout,
                     fetch_retry_seconds=fetch_retry_seconds,
+                    max_pages_per_chapter=max_pages_per_chapter,
+                    skip_volume_titles=skip_volume_titles,
                     ctrl=ctrl,
                 )
             except Exception as exc:
@@ -1409,6 +1426,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-timeout", type=float, default=30.0, help="API 请求超时秒数")
     parser.add_argument("--stall-timeout", type=int, default=300, help="章节卡住多少秒后换源")
     parser.add_argument("--fetch-retry", type=float, default=65.0, help="章节图片列表获取失败后重试的总时长秒数，期间持续重试，超时仍失败才跳过该章")
+    parser.add_argument("--max-pages", type=int, default=150, help="单话页数上限，超过判定为单行本/合集（卷）直接跳过（0 关闭）")
+    parser.add_argument("--no-skip-volume-titles", action="store_true", help="关闭章节名含“第x卷”字样的跳过检测")
     parser.add_argument("--no-resume", action="store_true", help="禁用断点续传")
     parser.add_argument("--cache-ttl", type=float, default=24, help="章节缓存有效期（小时）")
     parser.add_argument("--refresh", action="store_true", help="忽略缓存，强制重新获取章节图片列表")
@@ -1475,7 +1494,10 @@ def apply_config(
         "stall_timeout": "stall_timeout",
         "cache_ttl_hours": "cache_ttl",
         "chapter_gap_threshold": "chapter_gap_threshold",
+        "max_pages_per_chapter": "max_pages",
     }
+    if config.get("skip_volume_titles") is False and not args.no_skip_volume_titles:
+        args.no_skip_volume_titles = True
     float_keys = {
         "match_threshold": "match_threshold",
         "api_interval": "api_interval",
@@ -1600,6 +1622,8 @@ def _main_inner(ctrl: ControlState) -> int:
         api_interval=args.api_interval,
         stall_timeout=args.stall_timeout,
         fetch_retry_seconds=args.fetch_retry,
+        max_pages_per_chapter=args.max_pages,
+        skip_volume_titles=not args.no_skip_volume_titles,
         ctrl=ctrl,
         source_priority=(
             [s.strip().lower() for s in args.source_priority.split(",") if s.strip()]

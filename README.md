@@ -15,6 +15,9 @@
 - 缺页补齐：每次运行按源返回的页数校验，缺页自动补、完整跳过
 - 章节缓存：图片列表缓存到本地，换源后无需重复联网查询
 - 封面下载：自动保存封面到作品主目录
+- 获取失败自动重试：搜索无结果或章节图片列表获取失败时持续重试（默认 65 秒，`fetch_retry_seconds` 可配），进度区显示实时倒计时，超时仍失败才跳过
+- 单行本/卷识别：章节页数超过上限（默认 150 页）或章节名含“第x卷”时自动跳过，只下载话
+- 失败记录完整：换源过程中的失败章节也会写入 `失败.log`（即使最终换源成功）
 - 防卡死：章节进度卡住超过设定时间自动换源；图片下载超时可配置
 - 交互菜单：Ctrl+F 打开菜单，支持跳过漫画/章节、重下上一章、暂停等
 
@@ -35,7 +38,7 @@ pip install requests zhconv beautifulsoup4 pycryptodome curl_cffi
 ```
 
 ## 快速开始
-到[Release](https://github.com/FPV-G/Mana_Crawler/releases)下载最新版本并解压出来
+到[Release](https://github.com/FPV-G/Manga_Crawler/releases)下载最新版本并解压出来
 1. 编辑 `名单.txt`，每行一个漫画名。
 示例
 ```
@@ -67,6 +70,8 @@ python kaobei_downloader.py
 | `timeout` | 单张图片下载超时秒数 |
 | `stall_timeout` | 章节卡住多少秒后换源 |
 | `fetch_retry_seconds` | 获取失败后的重试总时长（秒）：搜索无结果 / 章节图片列表获取失败时持续重试，超时仍失败才跳过该章 |
+| `max_pages_per_chapter` | 单话页数上限，超过判定为单行本/合集（卷）直接跳过（0 关闭） |
+| `skip_volume_titles` | 章节名含“第x卷”字样直接跳过（单行本/合集） |
 | `cache_ttl_hours` | 章节缓存有效期（小时） |
 | `match_threshold` | 名称近似匹配阈值 |
 | `zmh_account` / `zmh_password` | 再漫画登录账号（可选） |
