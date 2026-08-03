@@ -35,7 +35,7 @@ pip install requests zhconv beautifulsoup4 pycryptodome curl_cffi
 ```
 
 ## 快速开始
-
+到[Release](https://github.com/FPV-G/Mana_Crawler/releases)下载最新版本并解压出来
 1. 编辑 `名单.txt`，每行一个漫画名。
 2. 复制 `config.json` 并按需修改（脚本默认读取当前目录的 `config.json`）。
 3. 运行：
