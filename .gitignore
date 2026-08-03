@@ -1,0 +1,22 @@
+# 下载内容与运行产物
+downloads/
+__pycache__/
+*.pyc
+
+# 日志
+result.log
+result.jsonl
+失败.log
+
+# 敏感配置与凭据
+config.json
+zmh_token.json
+
+# 临时文件
+*.part
+
+# 用户本地文件
+名单.json
+失败.json
+#.json
+小说漫画列表/
