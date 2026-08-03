@@ -360,6 +360,7 @@ class Progress:
         self.slots: list[dict[str, Any] | None] = [None] * self.slot_count
         self.chapter_totals: dict[int, int] = {}
         self.last_activity: dict[int, float] = {}
+        self.waiting: dict[int, float] = {}
         self.lock = threading.Lock()
         self.menu_open = False
 
@@ -379,6 +380,7 @@ class Progress:
             with self.lock:
                 self.done_chapters += 1
                 self.last_activity.pop(order, None)
+                self.waiting.pop(order, None)
             self._render_locked()
 
     def acquire_slot(self, order: int, filename: str) -> int:
@@ -417,6 +419,7 @@ class Progress:
             with self.lock:
                 self.done_chapters += 1
                 self.last_activity.pop(order, None)
+                self.waiting.pop(order, None)
                 for index in range(self.slot_count):
                     if self.slots[index] is not None and self.slots[index]["order"] == order:
                         self.slots[index] = None
@@ -428,6 +431,21 @@ class Progress:
                     sys.stdout.write(f"\033[{max(0, Progress.rows - 1)}A\033[J")
                     Progress.rows = 0
                 sys.stdout.flush()
+
+    def set_waiting(self, order: int, deadline: float) -> None:
+        """标记章节进入获取重试等待，进度区显示实时倒计时（每秒重绘）。"""
+        with _io_lock:
+            with self.lock:
+                self.waiting[order] = deadline
+                self.last_activity[order] = time.time()
+            self._render_locked()
+
+    def clear_waiting(self, order: int) -> None:
+        with _io_lock:
+            with self.lock:
+                self.waiting.pop(order, None)
+                self.last_activity.pop(order, None)
+            self._render_locked()
 
     def _render_locked(self) -> None:
         """渲染进度区；调用方必须已持有 _io_lock 和 self.lock。"""
@@ -448,28 +466,36 @@ class Progress:
                 continue
             groups.setdefault(int(slot["order"]), []).append(slot)
 
-        # 按章节号顺序排列，每个下载中的章节一行
-        for index, order in enumerate(sorted(groups)):
+        # 按章节号顺序排列，下载中与等待重试的章节各占一行
+        for index, order in enumerate(sorted(set(list(groups) + list(self.waiting)))):
             if index >= self.slot_count:
                 break
-            slots = groups[order]
-            current = min(slots, key=page_number)
-            filename = str(current["filename"])
-            pct = float(current["percent"])
-            if pct > 100:
-                pct = 100
-            bar_len = 20
-            filled = int(bar_len * pct / 100)
-            bar = "█" * filled + "░" * (bar_len - filled)
-            line = f"  第{order}话 {filename} [{bar}] {pct:5.1f}%"
+            waiting_deadline = self.waiting.get(order)
+            if waiting_deadline is not None:
+                remaining = max(0, int(waiting_deadline - time.time()))
+                minutes, seconds = divmod(remaining, 60)
+                line = f"  第{order}话 获取失败，重试倒计时 {minutes:02d}:{seconds:02d}"
+            else:
+                slots = groups[order]
+                current = min(slots, key=page_number)
+                filename = str(current["filename"])
+                pct = float(current["percent"])
+                if pct > 100:
+                    pct = 100
+                bar_len = 20
+                filled = int(bar_len * pct / 100)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                line = f"  第{order}话 {filename} [{bar}] {pct:5.1f}%"
             if index == 0:
                 suffix = f"总进度 {overall:.0f}%"
-                last = self.last_activity.get(order, time.time())
-                remaining = self.stall_timeout - (time.time() - last)
-                if remaining < 0:
-                    remaining = 0
-                minutes, seconds = divmod(int(remaining), 60)
-                line += f"  {suffix}  换源倒计时 {minutes:02d}:{seconds:02d}"
+                if waiting_deadline is None:
+                    last = self.last_activity.get(order, time.time())
+                    remaining = self.stall_timeout - (time.time() - last)
+                    if remaining < 0:
+                        remaining = 0
+                    minutes, seconds = divmod(int(remaining), 60)
+                    suffix += f"  换源倒计时 {minutes:02d}:{seconds:02d}"
+                line += f"  {suffix}"
             lines.append(line)
         while len(lines) < self.slot_count:
             lines.append("  等待中...")
@@ -766,9 +792,12 @@ class ResultRecorder:
                 fh.write(line + "\n")
             with open(self.jsonl_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            if status in ("failed", "no_result"):
+            if status in ("failed", "no_result") or failed_chapters:
+                fail_line = line
+                if failed_chapters and "失败章节" not in line:
+                    fail_line += f": 失败章节: {'; '.join(failed_chapters)}"
                 with open(self.fail_path, "a", encoding="utf-8") as fh:
-                    fh.write(line + "\n")
+                    fh.write(fail_line + "\n")
         if status == "success":
             emit(c_ok(line))
         elif status in ("failed", "no_result"):
@@ -887,6 +916,7 @@ def download_comic(
     cache_ttl: float = 86400,
     api_interval: float = 1.0,
     stall_timeout: int = 300,
+    fetch_retry_seconds: float = 65.0,
     ctrl: ControlState | None = None,
 ) -> tuple[int, list[str]]:
     if ctrl is None:
@@ -925,19 +955,46 @@ def download_comic(
                 ttl_seconds=cache_ttl,
             )
         if urls is None:
-            try:
-                with check_lock:
-                    api_limiter.acquire()
-                    time.sleep(api_interval)
-                    urls = source.get_chapter_images(comic, chapter)
-                if urls:
-                    write_chapter_cache(
-                        chapter_dir, chapter.order, source.name, urls, flat=flat
-                    )
-            except Exception as exc:
-                progress.mark_done(chapter.order)
-                emit(c_fail(f"    [fail] 获取章节失败: {exc}"))
-                return "fail", f"{label} (获取失败: {exc})"
+            deadline = time.monotonic() + max(0.0, fetch_retry_seconds)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    with check_lock:
+                        api_limiter.acquire()
+                        time.sleep(api_interval)
+                        urls = source.get_chapter_images(comic, chapter)
+                    if urls:
+                        write_chapter_cache(
+                            chapter_dir, chapter.order, source.name, urls, flat=flat
+                        )
+                    break
+                except Exception as exc:
+                    remaining = deadline - time.monotonic()
+                    if ev.is_set() or ctrl.exit_requested or remaining <= 0:
+                        progress.mark_done(chapter.order)
+                        emit(c_fail(
+                            f"    [fail] 获取章节失败（重试 {fetch_retry_seconds:.0f}s 后放弃）: {exc}"
+                        ))
+                        return "fail", f"{label} (获取失败: {exc})"
+                    wait = min(5.0, max(1.0, remaining))
+                    emit(c_warn(
+                        f"    [retry] 获取章节失败（第 {attempt} 次）: {exc}，"
+                        f"{wait:.0f}s 后重试（剩余 {remaining:.0f}s）"
+                    ))
+                    progress.set_waiting(chapter.order, deadline)
+                    slept = 0.0
+                    try:
+                        while (
+                            slept < wait
+                            and not ev.is_set()
+                            and not ctrl.exit_requested
+                        ):
+                            time.sleep(1.0)
+                            slept += 1.0
+                            progress.set_waiting(chapter.order, deadline)
+                    finally:
+                        progress.clear_waiting(chapter.order)
         else:
             emit(c_info(f"  [{chapter.order:03d}] 使用缓存校验 ({len(urls)} 页)"))
         if not urls:
@@ -1162,6 +1219,7 @@ def process_names(
     cache_ttl: float = 86400,
     api_interval: float = 1.0,
     stall_timeout: int = 300,
+    fetch_retry_seconds: float = 65.0,
     ctrl: ControlState | None = None,
     source_priority: list[str] | None = None,
     chapter_gap_threshold: int = 15,
@@ -1184,16 +1242,47 @@ def process_names(
             chapter_gap_threshold,
         )
         if not candidates:
+            # 无匹配结果时在 fetch_retry_seconds 内持续重试，超时仍无结果才跳过
+            deadline = time.monotonic() + max(0.0, fetch_retry_seconds)
+            attempt = 0
+            while not candidates:
+                attempt += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or ctrl.exit_requested:
+                    break
+                wait = min(5.0, max(1.0, remaining))
+                emit(c_warn(
+                    f"  [retry] 无匹配结果（第 {attempt} 次）: {name}，"
+                    f"{wait:.0f}s 后重试（剩余 {remaining:.0f}s）"
+                ))
+                slept = 0.0
+                while slept < wait and not ctrl.exit_requested:
+                    time.sleep(0.2)
+                    slept += 0.2
+                candidates = aggregate_candidates(
+                    sources,
+                    name,
+                    api_limiter,
+                    match_threshold,
+                    api_interval,
+                    source_priority,
+                    chapter_gap_threshold,
+                )
+        if not candidates:
             recorder.record(
                 name,
                 "no_result",
-                message=f"所有资源均无匹配结果（阈值 {match_threshold:.2f}）",
+                message=(
+                    f"所有资源均无匹配结果（阈值 {match_threshold:.2f}，"
+                    f"重试 {fetch_retry_seconds:.0f}s 后放弃）"
+                ),
             )
             continue
 
         used_sources: list[str] = []
         final_comic = candidates[0][1]
         final_failed: list[str] = []
+        all_failed: list[str] = []
         cover_ok = False
 
         for index, (source, comic, score) in enumerate(candidates):
@@ -1224,6 +1313,7 @@ def process_names(
                     cache_ttl=cache_ttl,
                     api_interval=api_interval,
                     stall_timeout=stall_timeout,
+                    fetch_retry_seconds=fetch_retry_seconds,
                     ctrl=ctrl,
                 )
             except Exception as exc:
@@ -1232,6 +1322,8 @@ def process_names(
                 emit(c_fail(f"  源[{source.label}] 下载异常: {exc}"))
 
             final_failed = failed_chapters
+            if failed_chapters:
+                all_failed.extend(failed_chapters)
             if not failed_chapters or ctrl.exit_requested:
                 break
             if fallback and index < len(candidates) - 1:
@@ -1257,13 +1349,13 @@ def process_names(
         recorder.record(
             name,
             status,
-            message="" if not final_failed else f"失败章节: {'; '.join(final_failed)}",
+            message="" if not all_failed else f"失败章节: {'; '.join(all_failed)}",
             matched_title=final_comic.title,
             comic_id=final_comic.id,
             source_label=" -> ".join(used_sources),
             total_chapters=selected_total,
             ok_chapters=ok_chapters,
-            failed_chapters=final_failed,
+            failed_chapters=all_failed,
         )
 
 
@@ -1316,6 +1408,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=60.0, help="图片请求超时秒数")
     parser.add_argument("--api-timeout", type=float, default=30.0, help="API 请求超时秒数")
     parser.add_argument("--stall-timeout", type=int, default=300, help="章节卡住多少秒后换源")
+    parser.add_argument("--fetch-retry", type=float, default=65.0, help="章节图片列表获取失败后重试的总时长秒数，期间持续重试，超时仍失败才跳过该章")
     parser.add_argument("--no-resume", action="store_true", help="禁用断点续传")
     parser.add_argument("--cache-ttl", type=float, default=24, help="章节缓存有效期（小时）")
     parser.add_argument("--refresh", action="store_true", help="忽略缓存，强制重新获取章节图片列表")
@@ -1388,6 +1481,7 @@ def apply_config(
         "api_interval": "api_interval",
         "timeout": "timeout",
         "api_timeout": "api_timeout",
+        "fetch_retry_seconds": "fetch_retry",
     }
 
     path_keys = {"list_file", "out_dir", "fail_log", "log_file", "jsonl_file"}
@@ -1505,6 +1599,7 @@ def _main_inner(ctrl: ControlState) -> int:
         cache_ttl=args.cache_ttl * 3600,
         api_interval=args.api_interval,
         stall_timeout=args.stall_timeout,
+        fetch_retry_seconds=args.fetch_retry,
         ctrl=ctrl,
         source_priority=(
             [s.strip().lower() for s in args.source_priority.split(",") if s.strip()]

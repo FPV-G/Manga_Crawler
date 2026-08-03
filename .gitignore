@@ -20,3 +20,8 @@ zmh_token.json
 失败.json
 \#.json
 小说漫画列表/
+
+# 打包产物
+build/
+dist/
+*.spec

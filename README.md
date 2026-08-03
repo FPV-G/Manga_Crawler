@@ -50,6 +50,7 @@ python kaobei_downloader.py
 | `image_rate` | 图片每分钟请求上限，0 不限 |
 | `timeout` | 单张图片下载超时秒数 |
 | `stall_timeout` | 章节卡住多少秒后换源 |
+| `fetch_retry_seconds` | 获取失败后的重试总时长（秒）：搜索无结果 / 章节图片列表获取失败时持续重试，超时仍失败才跳过该章 |
 | `cache_ttl_hours` | 章节缓存有效期（小时） |
 | `match_threshold` | 名称近似匹配阈值 |
 | `zmh_account` / `zmh_password` | 再漫画登录账号（可选） |
